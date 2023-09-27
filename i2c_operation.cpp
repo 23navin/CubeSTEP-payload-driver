@@ -306,7 +306,6 @@ int main (int argc, char **argv)
 
 			printf("Temperature: %f\n",uint_to_float.float_data);
 		}
-
 	}
 
 	//15 - Get PWM Duty
@@ -351,21 +350,40 @@ int main (int argc, char **argv)
 	}
 
 	//1A - Set PWM Array
-		/* OpCode 0x
-		Not Implemented*/
+	if(opcode == 0x5A){
+		uint32_t received_data = receive_one_byte(fd);
 
-	//1B
+		if(received_data == VALID) printf("Value was set\n");
+		if(received_data == INVALID) printf("<!> Experiment is active\n");
+		if(received_data == 0xFD) printf("<!> Stage provided is invalid>\n");
+		if(received_data == 0xFE) printf("<!> PWM provided is invalid>\n");
+	}
+
+	//1B - Set PWM Period
 	if(opcode == 0x9B){
 		uint32_t received_data = receive_one_byte(fd);
 
 		if(received_data == VALID) printf("Value was set\n");
 		if(received_data == INVALID) printf("<!> Experiment is active\n");
+		if(received_data == 0xFD) printf("<!> Period provided is invalid>\n");
 	}
 
-	//1C
+	//1C - Reset Log
+	if(opcode == 0x1C){
+		uint32_t received_data = receive_one_byte(fd);
+
+		if(received_data == VALID) printf("Log reset\n");
+		if(received_data == INVALID) printf("<!> Error when resetting log\n");
+	}
 
 	//1D
+	if(opcode == 0x9D){
+		uint32_t received_data = receive_one_byte(fd);
 
+		if(received_data == VALID) printf("Value was set\n");
+		if(received_data == INVALID) printf("<!> Experiment is active\n");
+		if(received_data == 0xFD) printf("<!> Stage provided is invalid>\n");
+	}
 	//1E
 
 	//1F
