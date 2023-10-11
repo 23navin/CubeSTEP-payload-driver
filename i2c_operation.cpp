@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <fstream>
 #include <stdio.h>
 #include <vector>
 #include <wiringPiI2C.h>
@@ -13,9 +14,10 @@ using namespace std;
 #define INVALID 0xFF
 #define UNKNOWN 0x44
 
-
 #define STARTUP_TX 0x50
 #define COOLDOWN_TX 0x51
+
+#define LOG_FILE "payload_log.csv"
 
 uint8_t receive_one_byte(int handle){
 	int rx_data = 0;
@@ -63,7 +65,7 @@ uint32_t receive_four_bytes(int handle){
 		}
 
 		rx_size--;
-		
+
 		//combine bytes
 		rx_data += buffer << (8*rx_size);
 	}
@@ -71,7 +73,7 @@ uint32_t receive_four_bytes(int handle){
 	return rx_data;
 }
 
-std::string receive_string(int handle){
+bool receive_string(int handle, std::string *rx_buffer){
 	string rx_data; //holds data received from device
 	uint8_t buffer;
 
@@ -86,17 +88,19 @@ std::string receive_string(int handle){
 	while(1) {
 		buffer = wiringPiI2CRead(handle);
 		if(buffer == 0x04) {
+			//end of line
 			break;
 		}
 		
 		if(buffer == INVALID) {
-			printf("End of File");
-			break;
+			//device did not send a line
+			return false;
 		}
 		rx_data.push_back(buffer);
 	}
 
-	return rx_data;
+	*rx_buffer = rx_data;
+	return true;
 
 }
 
@@ -145,18 +149,18 @@ int main (int argc, char **argv)
 	}
 	
 	//process parameters if present
-	uint32_t param;
+	uint32_t parameter;
 	if(argc > 2){
-		param = stoi(argv[2], nullptr, 16); //parameter from command line argument
+		parameter = stoi(argv[2], nullptr, 16); //parameter from command line argument
 		uint8_t pbyte[4]; //bytes to be sent
 		int size_of_parameter = 0;
 		int param_size_max = 4;
 
 		//split parameter into bytes
-		pbyte[3] = (param & 0xFF000000) >> 24;
-		pbyte[2] = (param & 0x00FF0000) >> 16;
-		pbyte[1] = (param & 0x0000FF00) >> 8;
-		pbyte[0] = param & 0x000000FF;
+		pbyte[3] = (parameter & 0xFF000000) >> 24;
+		pbyte[2] = (parameter & 0x00FF0000) >> 16;
+		pbyte[1] = (parameter & 0x0000FF00) >> 8;
+		pbyte[0] = parameter & 0x000000FF;
 
 		//determine how many bytes need to be sent
 		size_of_parameter = opcode >> 5;
@@ -167,6 +171,9 @@ int main (int argc, char **argv)
 			printf("Parameter %02X sent\n", pbyte[i-1]);
 		}
 	}
+
+	//for retrieving telemetry log to local csv file
+	std::ofstream log;
 
 	//process data response if applicable
 
@@ -265,23 +272,41 @@ int main (int argc, char **argv)
 		uint32_t received_data = receive_one_byte(fd);
 
 		if(received_data == VALID) printf("Log is ready to be read\n");
+
+		//create local file
+		log.open("payload_log.csv");
 	}
 
 	//10 - unused
 
 	//11 - Get Experiment Log
 	if(opcode == 0x11) {
-		string received_data = receive_string(fd);
+		string received_data;
 		//INVALID
-		printf("\nData Response: %s\n", received_data.c_str());
+
+		const string eof = "End of File";
+		if(receive_string(fd, &received_data)){
+			printf("\nData Response: %s\n", received_data.c_str());
+			
+			std::fstream fs;
+  			fs.open(LOG_FILE, std::fstream::app);
+			fs << received_data;
+			fs << "\n";
+			fs.close();
+		}
+		else{
+			printf("END\n");
+		}
 	}
 
 	//12 - Get Time
 	if(opcode == 0x32){
 		uint32_t received_data = receive_four_bytes(fd);
 
-		if(received_data == UNKNOWN) printf("<!> Parameter undefined>\n");
-		else printf("Time: %X\n", received_data);
+		if((received_data >> 24) == UNKNOWN) {
+			printf("<!> Parameter is undefined\n");
+		}
+		else printf("Time: %u\n", received_data);
 	}
 
 	//13 - Set Time
@@ -385,8 +410,32 @@ int main (int argc, char **argv)
 		if(received_data == 0xFD) printf("<!> Stage provided is invalid>\n");
 	}
 	//1E
+	if(opcode == 0x9E){
+		uint32_t received_data = receive_one_byte(fd);
+
+		if(received_data == VALID) printf("Value was set\n");
+		if(received_data == INVALID) printf("<!> Task is active\n");
+	}
 
 	//1F
+	if(opcode == 0x3F){
+		uint32_t received_data = receive_one_byte(fd);
+
+		if(received_data == VALID){
+			if(parameter == 0x01) printf("Passive Logger Started\n");
+			if(parameter == 0x02) printf("Passive Logger Stopped\n");
+			if(parameter == 0x03) printf("Passive Logger is Active\n");
+		}
+
+		if(received_data == INVALID){
+			if(parameter == 0x01) printf("<!> Passive Logger already started\n");
+			if(parameter == 0x02) printf("<!> Passive Logger already stopped\n");
+			if(parameter == 0x03) printf("Passive Logger is Inactive\n");
+		}
+
+		if(received_data == UNKNOWN) printf("<!> Parameter is undefined\n");
+
+	}
 
 	return 0;
 }
