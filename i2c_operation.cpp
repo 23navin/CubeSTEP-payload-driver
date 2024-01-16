@@ -3,8 +3,10 @@
 #include <fstream>
 #include <stdio.h>
 #include <vector>
-#include <wiringPiI2C.h>
 using namespace std;
+
+#include <fcntl.h> //open
+#include <sys/ioctl.h> //ioctl
 
 #define DEVICE_ID 0x23
 
@@ -19,12 +21,111 @@ using namespace std;
 
 #define LOG_FILE "payload_log.csv"
 
+union i2c_smbus_data
+{
+  uint8_t  byte;
+  uint16_t word;
+};
+
+struct i2c_smbus_ioctl_data
+{
+  char read_write ;
+  uint8_t command ;
+  int size ;
+  union i2c_smbus_data *data ;
+};
+
+int i2c_read(int file){
+	i2c_smbus_data data;
+
+	i2c_smbus_ioctl_data args = {
+		.read_write = 1, //I2C_SMBUS_READ
+		.command = 0,
+		.size = 1, //I2C_SMBUS_BYTE
+		.data = &data
+	};
+
+	if(ioctl (file, 0x0720, &args))
+		return -1;
+
+	return data.byte & 0xFF;
+}
+
+int i2c_write(int file, uint8_t data){
+	i2c_smbus_ioctl_data args = {
+		.read_write = 0, //I2C_SMBUS_WRITE
+		.command = data,
+		.size = 1, //I2C_SMBUS_BYTE
+		.data = NULL
+	};
+
+	return ioctl (file, 0x0720, &args);
+}
+
+int connect(const char *i2c_device){
+	int file;
+	if((file = open(i2c_device, O_RDWR)) < 0)
+		return -1; //Can't open i2c device
+	
+	if(ioctl(file, 0x0703, DEVICE_ID) < 0)
+		return -1; //Can't select i2c device
+
+	return file;
+}
+
+int handshake(int file, uint8_t opcode, uint32_t parameter){
+	uint8_t pbyte[4]; //bytes to be sent
+	int size_of_parameter = 0;
+	int param_size_max = 4;
+
+	//The device takes some time to wake up so\
+	0x03 (Wake Device) must wait until confirmation\
+	before it can be sent and processed.
+	if(opcode == 0x03) {
+		printf("<0x03>waiting");
+		while(i2c_read(file) != DEVICE_ID) {
+			printf(".");
+		}
+		printf("\n");
+		printf("Device Awakened\n");
+	}
+
+	//send operation request
+	uint8_t data_to_send = opcode;
+	i2c_write(file, data_to_send);
+	
+	//receive request receipt
+	int received_data = i2c_read(file);
+	while(received_data != data_to_send) {
+		received_data = i2c_read(file);
+	}
+
+	printf("Confirmation receipt received\n");
+
+	//split parameter into bytes
+	pbyte[3] = (parameter & 0xFF000000) >> 24;
+	pbyte[2] = (parameter & 0x00FF0000) >> 16;
+	pbyte[1] = (parameter & 0x0000FF00) >> 8;
+	pbyte[0] = parameter & 0x000000FF;
+
+	//determine how many bytes need to be sent
+	size_of_parameter = opcode >> 5;
+
+	//send parameter byte(s)
+	for(int i = size_of_parameter; i > 0; i--){
+		i2c_write(file, pbyte[i-1]);
+		printf("Parameter %02X sent\n", pbyte[i-1]);
+	}
+
+	return 1;
+}
+
 uint8_t receive_one_byte(int handle){
 	int rx_data = 0;
 	
 	//wait for start byte
 	printf("<sb>waiting");
-	while(wiringPiI2CRead(handle) != START_BYTE) {
+	while(i2c_read(handle) != START_BYTE) {
 		printf(".");
 	}
 	printf("\n");
@@ -32,7 +133,7 @@ uint8_t receive_one_byte(int handle){
 	//bug fix to ignore erroneous extra start bytes
 	do{
 		//receive data
-		rx_data = wiringPiI2CRead(handle);
+		rx_data = i2c_read(handle);
 	}while(rx_data == START_BYTE);
 
 	return rx_data;
@@ -43,7 +144,7 @@ uint32_t receive_four_bytes(int handle){
 
 	//wait for start byte
 	printf("<sb>waiting");
-	while(wiringPiI2CRead(handle) != START_BYTE) {
+	while(i2c_read(handle) != START_BYTE) {
 		printf(".");
 	}
 	printf("\n");
@@ -56,12 +157,12 @@ uint32_t receive_four_bytes(int handle){
 		if(rx_size == 4) {
 			do{
 				//receive data
-				buffer = wiringPiI2CRead(handle);
+				buffer = i2c_read(handle);
 			}while(buffer == START_BYTE);
 		}
 		else {
 			//receive data
-			buffer = wiringPiI2CRead(handle);
+			buffer = i2c_read(handle);
 		}
 
 		rx_size--;
@@ -79,14 +180,14 @@ bool receive_string(int handle, std::string *rx_buffer){
 
 	//wait for start byte
 	printf("<sb>waiting");
-	while(wiringPiI2CRead(handle) != START_BYTE) {
+	while(i2c_read(handle) != START_BYTE) {
 		printf(".");
 	}
 	printf("\n");
 
 	//receive data
 	while(1) {
-		buffer = wiringPiI2CRead(handle);
+		buffer = i2c_read(handle);
 		if(buffer == 0x04) {
 			//end of line
 			break;
@@ -107,70 +208,27 @@ bool receive_string(int handle, std::string *rx_buffer){
 int main (int argc, char **argv)
 {
 	//connect i2c
-	int fd = wiringPiI2CSetup(DEVICE_ID);
+	int fd = connect("/dev/i2c-1");
 	if(fd == -1) {
 		printf("I2C Failed\n");
 		return -1;
 	}
 	printf("I2C Connected.\n");
 
-	// int szg = wiringPiI2CRead(fd);
-	// printf("first byte: %02X\n", szg);
-
 	//process operation request
-	int opcode;
+	uint8_t opcode;
 	if(argc > 1) {
 		//set opcode from command line argument
-		opcode = stoi(argv[1], nullptr, 16);
-
-		//The device takes some time to wake up so\
-		0x03 (Wake Device) must wait until confirmation\
-		before it can be sent and processed.
-		if(opcode == 0x03) {
-			printf("<0x03>waiting");
-			while(wiringPiI2CRead(fd) != DEVICE_ID) {
-				printf(".");
-			}
-			printf("\n");
-			printf("Device Awakened\n");
-		}
-
-		//send operation request
-		uint8_t data_to_send = opcode;
-		wiringPiI2CWrite(fd, data_to_send);
-		
-		//receive request receipt
-		int received_data = wiringPiI2CRead(fd);
-		while(received_data != data_to_send) {
-				received_data = wiringPiI2CRead(fd);
-		}
-
-		printf("Confirmation receipt received\n");
+		opcode = stoi(argv[1], nullptr, 16); 
 	}
 	
 	//process parameters if present
-	uint32_t parameter;
+	uint32_t parameter = 0;
 	if(argc > 2){
 		parameter = stoi(argv[2], nullptr, 16); //parameter from command line argument
-		uint8_t pbyte[4]; //bytes to be sent
-		int size_of_parameter = 0;
-		int param_size_max = 4;
-
-		//split parameter into bytes
-		pbyte[3] = (parameter & 0xFF000000) >> 24;
-		pbyte[2] = (parameter & 0x00FF0000) >> 16;
-		pbyte[1] = (parameter & 0x0000FF00) >> 8;
-		pbyte[0] = parameter & 0x000000FF;
-
-		//determine how many bytes need to be sent
-		size_of_parameter = opcode >> 5;
-
-		//send parameter byte(s)
-		for(int i = size_of_parameter; i > 0; i--){
-			wiringPiI2CWrite(fd, pbyte[i-1]);
-			printf("Parameter %02X sent\n", pbyte[i-1]);
-		}
 	}
+
+	handshake(fd, opcode, parameter);
 
 	//for retrieving telemetry log to local csv file
 	std::ofstream log;
@@ -344,9 +402,9 @@ int main (int argc, char **argv)
 	if(opcode == 0x16){
 		uint32_t received_data = receive_one_byte(fd);
 
-		if(received_data == INVALID) printf("<!> Experiment is inactive\n");
-		else if(received_data == STARTUP_TX) printf("Experiment is in Startup Phase\n");
-		else if(received_data == COOLDOWN_TX) printf("Experiment is in Cooldown Phase\n");
+		if(received_data == 0) printf("<!> Experiment is inactive\n");
+		else if(received_data == 2) printf("Experiment is in Startup Phase\n");
+		else if(received_data == 3) printf("Experiment is in Cooldown Phase\n");
 		else printf("Experiment is in Stage #%i\n", received_data);
 	}
 

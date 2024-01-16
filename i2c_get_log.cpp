@@ -118,25 +118,6 @@ int main (int argc, char **argv)
 	}
 	printf("I2C Connected.\n");
 
-    //prep
-    data_to_send = 0x0F;
-    wiringPiI2CWrite(fd, data_to_send);
-
-    //prep receipt
-    int receipt = wiringPiI2CRead(fd);
-    while(receipt != data_to_send) {
-        receipt = wiringPiI2CRead(fd);
-    }
-
-    //prep response
-    response = receive_one_byte(fd);
-    if(response == VALID){
-        printf("Log is ready to be read\n");
-    }
-    else{
-        return -1;
-    }
-
     bool lines_left = true;
     while(lines_left){
         //retrieve
